@@ -259,6 +259,8 @@ func HostnameOr(def string) string {
 type AppOptions struct {
 	Verbose     bool
 	ConfigPath  string
+	LogEnabled  bool
+	LogDebug    bool
 	ListenPort  int
 	DialAddr    string
 	FriendName  string
@@ -641,7 +643,14 @@ func collectDashPrefixedArgs(args []string) ([]string, map[int]struct{}) {
 		}
 		key := normalizeFlagKey(keyToken)
 		combined := token
-		if !strings.Contains(token, "=") && flagRequiresValue(key) && i+1 < len(args) {
+		if !strings.Contains(token, "=") && flagConsumesOptionalValue(key) && i+1 < len(args) {
+			next := args[i+1]
+			if next != "--" && !strings.HasPrefix(next, "-") {
+				consumed[i+1] = struct{}{}
+				combined = fmt.Sprintf("%s=%s", token, next)
+				i++
+			}
+		} else if !strings.Contains(token, "=") && flagRequiresValue(key) && i+1 < len(args) {
 			next := args[i+1]
 			if next != "--" && !strings.HasPrefix(next, "-") {
 				consumed[i+1] = struct{}{}
@@ -694,6 +703,22 @@ func applyFlagTokens(tokens []string, opts *AppOptions, state *flagParseState) e
 				return fmt.Errorf("-config specified multiple times")
 			}
 			opts.ConfigPath = value
+		case "log":
+			opts.LogEnabled = true
+			if hasValue && value != "" {
+				switch strings.ToLower(strings.TrimSpace(value)) {
+				case "debug":
+					opts.LogDebug = true
+					opts.Verbose = true
+				case "true":
+					opts.LogEnabled = true
+				case "false":
+					opts.LogEnabled = false
+					opts.LogDebug = false
+				default:
+					return fmt.Errorf("invalid value for -log: %q", value)
+				}
+			}
 		case "contacts":
 			if !hasValue || value == "" {
 				return fmt.Errorf("-contacts requires a value")
@@ -795,6 +820,15 @@ func normalizeFlagKey(raw string) string {
 func flagRequiresValue(key string) bool {
 	switch key {
 	case "config", "contacts", "port", "fps":
+		return true
+	default:
+		return false
+	}
+}
+
+func flagConsumesOptionalValue(key string) bool {
+	switch key {
+	case "log":
 		return true
 	default:
 		return false

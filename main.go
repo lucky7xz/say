@@ -60,7 +60,7 @@ func run() (err error) {
 	udptransport.SetMaxVideoFPS(opts.MaxVideoFPS)
 	ui.SetVideoFPSLimit(opts.MaxVideoFPS)
 
-	logWriter, closeLog, logPath, logErr := initLogSink(opts.ConfigPath)
+	logWriter, closeLog, logPath, logErr := initLogSink(opts.ConfigPath, opts.LogEnabled)
 	if closeLog != nil {
 		defer closeLog()
 	}
@@ -70,9 +70,9 @@ func run() (err error) {
 	}
 	log.SetOutput(logOutput)
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
-	if logErr == nil {
+	if logWriter != nil && logErr == nil {
 		fmt.Fprintf(os.Stderr, "[say] logs: %s\n", logPath)
-	} else {
+	} else if logErr != nil {
 		fmt.Fprintf(os.Stderr, "[say] log file disabled (%v)\n", logErr)
 	}
 
@@ -280,15 +280,21 @@ func mergeFriendLists(base, extra []conf.Friend) []conf.Friend {
 	return merged
 }
 
-func initLogSink(configPath string) (io.Writer, func() error, string, error) {
-	dir := filepath.Dir(configPath)
+func initLogSink(configPath string, logEnabled bool) (io.Writer, func() error, string, error) {
+	if !logEnabled {
+		return nil, nil, "", nil
+	}
+	logPath, err := resolveLogPath(configPath, logEnabled)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	dir := filepath.Dir(logPath)
 	if dir == "" {
 		dir = "."
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, nil, "", err
 	}
-	logPath := filepath.Join(dir, "say.log")
 	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return nil, nil, logPath, err
@@ -297,6 +303,36 @@ func initLogSink(configPath string) (io.Writer, func() error, string, error) {
 		return f.Close()
 	}
 	return f, closeFn, logPath, nil
+}
+
+func resolveLogPath(configPath string, logEnabled bool) (string, error) {
+	if logEnabled {
+		exePath, err := os.Executable()
+		if err != nil {
+			return "", err
+		}
+		if resolvedExePath, err := filepath.EvalSymlinks(exePath); err == nil && resolvedExePath != "" {
+			exePath = resolvedExePath
+		}
+		name := strings.TrimSpace(filepath.Base(configPath))
+		if name == "" || name == "." || name == string(filepath.Separator) {
+			name = "say"
+		}
+		ext := filepath.Ext(name)
+		if ext != "" {
+			name = strings.TrimSuffix(name, ext)
+		}
+		if name == "" {
+			name = "say"
+		}
+		return filepath.Join(filepath.Dir(exePath), name+".log"), nil
+	}
+
+	dir := filepath.Dir(configPath)
+	if dir == "" {
+		dir = "."
+	}
+	return filepath.Join(dir, "say.log"), nil
 }
 
 func formatSayHint(addr string, port int) string {

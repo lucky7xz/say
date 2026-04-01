@@ -220,9 +220,11 @@ pass `-config`; bare tokens are no longer treated as profile names.
 Audio and video are always enabled when hardware is present; no extra flags are
 required. Relevant CLI switches:
 
+- Without `-log`, Say writes logs only to stderr. With `-log`, it also writes a log file next to the running executable using the config name, for example `-config client` -> `client.log`. The resolved path is printed on startup. Use `-log debug` for the most detailed file logging.
 - `-port` – listening TCP/UDP port (defaults to `7777`).
 - `-fps` – cap video capture/rendering to N FPS (5–30, defaults to `25`).
 - `-config` – config profile or path; `-config work` maps to `$XDG_CONFIG_HOME/say/work.json`.
+- `-log` – write `<config-name>.log` next to the running executable. `-log debug` also enables verbose debug logging.
 - `-contacts` – override the contacts directory defined in the config.
 - `-v` – verbose logging.
 - `-version` – print version and exit.
