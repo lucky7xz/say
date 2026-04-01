@@ -211,6 +211,14 @@ Optionally pass the port as a separate argument, in any order:
 ./say "200:abcd:1234:..." 7777
 ```
 
+To bypass Yggdrasil and use ordinary TCP/UDP over a regular IP address, select
+the plain transport explicitly:
+
+```sh
+./say -transport plain -port 7000
+./say -transport plain -port 7001 "127.0.0.1:7000"
+```
+
 Select alternative configs explicitly via `-config work` (which maps to
 `$XDG_CONFIG_HOME/say/work.json`). Positional arguments are interpreted as
 either a dial target (`"200:abcd:..."`) or a friend name from contacts
@@ -222,6 +230,7 @@ required. Relevant CLI switches:
 
 - Without `-log`, Say writes logs only to stderr. With `-log`, it also writes a log file next to the running executable using the config name, for example `-config client` -> `client.log`. The resolved path is printed on startup. Use `-log debug` for the most detailed file logging.
 - `-port` – listening TCP/UDP port (defaults to `7777`).
+- `-transport` – network backend: `ygg` (default, embedded Yggdrasil) or `plain` (ordinary TCP/UDP over regular IP).
 - `-fps` – cap video capture/rendering to N FPS (5–30, defaults to `25`).
 - `-config` – config profile or path; `-config work` maps to `$XDG_CONFIG_HOME/say/work.json`.
 - `-log` – write `<config-name>.log` next to the running executable. `-log debug` also enables verbose debug logging.

@@ -1,28 +1,86 @@
 package network
 
 import (
+	"context"
+	"fmt"
 	"log"
+	"net"
+	"sync"
+	"time"
 
 	ygg "github.com/svanichkin/ygg"
 )
 
-// SetupYgg initializes an embedded Yggdrasil node using the provided configuration.
-// It sets verbosity, peer limits, and connectivity callbacks before constructing the node.
-// Returns the created node, its mesh address as string, or an error on failure.
-func SetupYgg(verbose bool, cfgPath string, h func(connected bool)) (*ygg.Node, string, error) {
+type yggTransport struct {
+	node      *ygg.Node
+	addr      string
+	readyCh   chan struct{}
+	readyOnce sync.Once
+}
+
+func newYggTransport(verbose bool, cfgPath string) (Transport, error) {
+	t := &yggTransport{
+		readyCh: make(chan struct{}),
+	}
+
 	log.Printf("[net] loading")
 	ygg.SetVerbose(verbose)
 	ygg.SetMaxPeers(100)
-	ygg.SetConnectivityHandler(h)
+	ygg.SetConnectivityHandler(func(connected bool) {
+		if connected {
+			t.readyOnce.Do(func() {
+				close(t.readyCh)
+			})
+		}
+	})
 
-	// create or load the Yggdrasil node using the supplied config path
 	node, err := ygg.New(cfgPath)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 
-	// obtain the node's mesh IPv6 address as a stable string representation
-	addrStr := node.Core.Address().String()
+	t.node = node
+	t.addr = node.Core.Address().String()
+	return t, nil
+}
 
-	return node, addrStr, nil
+func (t *yggTransport) Kind() TransportKind {
+	return TransportYggdrasil
+}
+
+func (t *yggTransport) LocalAddr() string {
+	return t.addr
+}
+
+func (t *yggTransport) WaitReady(ctx context.Context, timeout time.Duration) error {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.readyCh:
+		return nil
+	case <-timer.C:
+		return fmt.Errorf("ygg connectivity timeout after %s", timeout)
+	}
+}
+
+func (t *yggTransport) ListenTCP(port int) (net.Listener, error) {
+	return ygg.ListenTCP(port)
+}
+
+func (t *yggTransport) ListenUDP(port int) (net.PacketConn, error) {
+	return ygg.ListenUDP(port)
+}
+
+func (t *yggTransport) DialTCP(host string, port int) (net.Conn, error) {
+	return ygg.DialTCP(host, port)
+}
+
+func (t *yggTransport) Close() error {
+	if t == nil || t.node == nil {
+		return nil
+	}
+	return t.node.Close()
 }

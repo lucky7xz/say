@@ -21,8 +21,6 @@ import (
 	tcpsignal "github.com/svanichkin/say/network/tcp"
 	udptransport "github.com/svanichkin/say/network/udp"
 	"github.com/svanichkin/say/ui"
-
-	ygg "github.com/svanichkin/ygg"
 )
 
 var version = "dev"
@@ -123,42 +121,47 @@ func run() (err error) {
 		}
 	}()
 
-	// Initialize the embedded Yggdrasil node with the configured verbosity, peer limits and callbacks.
-	var yggAddrStr string
-	connectedCh := make(chan struct{}, 1)
-	node, yggAddrStr, err := network.SetupYgg(conf.Verbose, opts.ConfigPath, func(connected bool) {
-		if connected {
-			logs.LogV("[p2p] online %s", network.PrettyAddr(yggAddrStr, opts.ListenPort))
-			select {
-			case connectedCh <- struct{}{}:
-			default:
-			}
-		} else {
-			logs.LogV("[p2p] offline %s", network.PrettyAddr(yggAddrStr, opts.ListenPort))
-		}
-	})
+	transport, err := network.SetupTransport(opts.Transport, conf.Verbose, opts.ConfigPath)
 	if err != nil {
 		return err
 	}
-	defer node.Close()
-	ui.SetStatusMessage("Connecting to Ygg network…")
-	if err := waitForConnectivity(appCtx, connectedCh, 30*time.Second); err != nil {
+	defer transport.Close()
+	if transport.Kind() == network.TransportYggdrasil {
+		ui.SetStatusMessage("Connecting to Ygg network…")
+	} else {
+		ui.SetStatusMessage("Preparing TCP/UDP transport…")
+	}
+	if err := transport.WaitReady(appCtx, 30*time.Second); err != nil {
 		if errors.Is(err, context.Canceled) {
 			return nil
 		}
 		return err
 	}
+	localAddr := strings.TrimSpace(transport.LocalAddr())
+	if localAddr != "" {
+		logs.LogV("[p2p] online %s", network.PrettyAddr(localAddr, opts.ListenPort))
+	} else {
+		logs.LogV("[p2p] online (%s)", opts.Transport)
+	}
 	if opts.DialAddr == "" {
-		hint := formatSayHint(yggAddrStr, opts.ListenPort)
-		ui.SetCopyableStatus(hint, hint)
+		if localAddr != "" {
+			hint := formatSayHint(opts.Transport, localAddr, opts.ListenPort)
+			ui.SetCopyableStatus(hint, hint)
+		} else if opts.Transport == network.TransportPlain {
+			ui.SetStatusMessage(fmt.Sprintf("Plain TCP/UDP transport ready on port %d", opts.ListenPort))
+		}
 	}
 
-	udpConn, err := ygg.ListenUDP(opts.ListenPort)
+	udpConn, err := transport.ListenUDP(opts.ListenPort)
 	if err != nil {
 		return fmt.Errorf("udp listen failed: %w", err)
 	}
 	defer udpConn.Close()
-	logs.LogV("[p2p] UDP bound on %s", network.PrettyAddr(yggAddrStr, opts.ListenPort))
+	if localAddr != "" {
+		logs.LogV("[p2p] UDP bound on %s", network.PrettyAddr(localAddr, opts.ListenPort))
+	} else if udpAddr := udpConn.LocalAddr(); udpAddr != nil {
+		logs.LogV("[p2p] UDP bound on %s", udpAddr.String())
+	}
 
 	var mediaFactory tcpsignal.MediaSessionFactory
 	if udpConn != nil {
@@ -204,7 +207,7 @@ func run() (err error) {
 	)
 
 	if opts.DialAddr == "" {
-		tcp, err := ygg.ListenTCP(opts.ListenPort)
+		tcp, err := transport.ListenTCP(opts.ListenPort)
 		if err != nil {
 			return fmt.Errorf("listen failed: %w", err)
 		}
@@ -213,8 +216,8 @@ func run() (err error) {
 			return fmt.Errorf("listen failed: %w", err)
 		}
 		defer stopServer()
-		if yggAddrStr != "" {
-			log.Printf("[hint] %s", formatSayHint(yggAddrStr, opts.ListenPort))
+		if localAddr != "" {
+			log.Printf("[hint] %s", formatSayHint(opts.Transport, localAddr, opts.ListenPort))
 		}
 	} else {
 		host, port, err := conf.ParseDialTarget(opts.DialAddr, opts.ListenPort)
@@ -225,7 +228,7 @@ func run() (err error) {
 		dialCtx, cancel := context.WithCancel(appCtx)
 		cancelAutodial = cancel
 		go func() {
-			autodialErrCh <- autodial(dialCtx, host, port, termSync, mediaFactory)
+			autodialErrCh <- autodial(dialCtx, host, port, termSync, mediaFactory, transport.DialTCP)
 		}()
 	}
 
@@ -335,18 +338,12 @@ func resolveLogPath(configPath string, logEnabled bool) (string, error) {
 	return filepath.Join(dir, "say.log"), nil
 }
 
-func formatSayHint(addr string, port int) string {
-	host := normalizeHost(addr)
-	if host == "" {
-		host = "<address>"
+func formatSayHint(transport network.TransportKind, addr string, port int) string {
+	target := formatPeerAddr(addr, port)
+	if transport == network.TransportPlain {
+		return fmt.Sprintf("say -transport plain \"%s\"", target)
 	}
-	if port > 0 && port != network.DefaultListenPort {
-		if strings.Contains(host, ":") {
-			host = fmt.Sprintf("[%s]", host)
-		}
-		host = fmt.Sprintf("%s:%d", host, port)
-	}
-	return fmt.Sprintf("say \"%s\"", host)
+	return fmt.Sprintf("say \"%s\"", target)
 }
 
 func formatPeerAddr(host string, port int) string {
@@ -369,7 +366,7 @@ func normalizeHost(addr string) string {
 	return host
 }
 
-func autodial(ctx context.Context, host string, port int, termSync *tcpsignal.TermSizeSync, mediaFactory tcpsignal.MediaSessionFactory) error {
+func autodial(ctx context.Context, host string, port int, termSync *tcpsignal.TermSizeSync, mediaFactory tcpsignal.MediaSessionFactory, dial tcpsignal.TCPDialFunc) error {
 	const (
 		initialDelay = time.Second
 		maxDelay     = 15 * time.Second
@@ -392,7 +389,7 @@ func autodial(ctx context.Context, host string, port int, termSync *tcpsignal.Te
 			ui.SetStatusMessage(fmt.Sprintf("Re-dialing %s (attempt %d)…", target, attempt))
 		}
 
-		stopClient, connDone, err := tcpsignal.StartSignalClientTCP(conf.HostnameOr("me"), host, port, termSync, mediaFactory)
+		stopClient, connDone, err := tcpsignal.StartSignalClientTCP(conf.HostnameOr("me"), host, port, termSync, mediaFactory, dial)
 		if err == nil {
 			ui.SetStatusMessage(fmt.Sprintf("Connected to %s", target))
 			log.Printf("[p2p] dial established to %s", target)
@@ -429,30 +426,6 @@ func autodial(ctx context.Context, host string, port int, termSync *tcpsignal.Te
 			}
 		}
 		attempt++
-	}
-}
-
-func waitForConnectivity(ctx context.Context, ch <-chan struct{}, timeout time.Duration) error {
-	select {
-	case <-ch:
-		return nil
-	default:
-	}
-
-	if timeout <= 0 {
-		timeout = 30 * time.Second
-	}
-
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-ch:
-		return nil
-	case <-timer.C:
-		return fmt.Errorf("ygg connectivity timeout after %s", timeout)
 	}
 }
 

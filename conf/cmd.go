@@ -259,6 +259,7 @@ func HostnameOr(def string) string {
 type AppOptions struct {
 	Verbose     bool
 	ConfigPath  string
+	Transport   network.TransportKind
 	LogEnabled  bool
 	LogDebug    bool
 	ListenPort  int
@@ -293,6 +294,7 @@ type flagParseState struct {
 // the final configuration path. It performs only argument parsing and normalization.
 func ParseCLI() (*AppOptions, error) {
 	opts := &AppOptions{
+		Transport:   network.TransportYggdrasil,
 		ListenPort:  network.DefaultListenPort,
 		MaxVideoFPS: 25,
 	}
@@ -339,7 +341,7 @@ func ParseCLI() (*AppOptions, error) {
 			return nil, fmt.Errorf("extra numeric argument %q", remaining[0])
 		}
 		pendingArg = remaining[0]
-		pendingDial = isLikelyDial(pendingArg)
+		pendingDial = isLikelyDial(pendingArg, opts.Transport)
 	}
 
 	resolvedCfg, err := resolveConfigPath(configArg)
@@ -520,29 +522,7 @@ func compactArgs(args []string) []string {
 	return out
 }
 
-func extractDialAddressArg(args []string) (string, []string) {
-	if len(args) == 0 {
-		return "", args
-	}
-	filtered := make([]string, 0, len(args))
-	var dial string
-	consumed := false
-	for _, token := range args {
-		trimmed := strings.TrimSpace(token)
-		if trimmed == "" {
-			continue
-		}
-		if !consumed && isLikelyDial(trimmed) {
-			dial = trimmed
-			consumed = true
-			continue
-		}
-		filtered = append(filtered, trimmed)
-	}
-	return dial, filtered
-}
-
-func isLikelyDial(token string) bool {
+func isLikelyDial(token string, transport network.TransportKind) bool {
 	if token == "" {
 		return false
 	}
@@ -550,6 +530,9 @@ func isLikelyDial(token string) bool {
 		return false
 	}
 	if strings.ContainsAny(token, "[]:") {
+		return true
+	}
+	if transport == network.TransportPlain {
 		return true
 	}
 	return strings.Contains(token, ".")
@@ -703,6 +686,15 @@ func applyFlagTokens(tokens []string, opts *AppOptions, state *flagParseState) e
 				return fmt.Errorf("-config specified multiple times")
 			}
 			opts.ConfigPath = value
+		case "transport", "proto":
+			if !hasValue || value == "" {
+				return fmt.Errorf("-transport requires a value")
+			}
+			transport, err := network.ParseTransportKind(value)
+			if err != nil {
+				return err
+			}
+			opts.Transport = transport
 		case "log":
 			opts.LogEnabled = true
 			if hasValue && value != "" {
@@ -819,7 +811,7 @@ func normalizeFlagKey(raw string) string {
 
 func flagRequiresValue(key string) bool {
 	switch key {
-	case "config", "contacts", "port", "fps":
+	case "config", "transport", "proto", "contacts", "port", "fps":
 		return true
 	default:
 		return false

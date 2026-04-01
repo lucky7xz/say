@@ -7,20 +7,25 @@ import (
 	"io"
 	"log"
 	"net"
-	"github.com/svanichkin/say/logs"
-	"github.com/svanichkin/say/ui"
+	"strconv"
 	"strings"
 	"time"
 
-	ygg "github.com/svanichkin/ygg"
+	"github.com/svanichkin/say/logs"
+	"github.com/svanichkin/say/ui"
 )
 
-// StartSignalClientTCP connects to peerAddr (Yggdrasil IPv6) on the given port and performs
-// the same HELLO/OK handshake as handleIncoming, using the Yggdrasil TCP dialer.
+type TCPDialFunc func(host string, port int) (net.Conn, error)
+
+// StartSignalClientTCP connects to peerAddr on the given port and performs
+// the same HELLO/OK handshake as handleIncoming, using the provided TCP dialer.
 // On success it returns a framedConn suitable for sending and receiving frames along with a done channel.
-func StartSignalClientTCP(localName string, peerAddr string, port int, termSync *TermSizeSync, mediaFactory MediaSessionFactory) (func() error, <-chan struct{}, error) {
+func StartSignalClientTCP(localName string, peerAddr string, port int, termSync *TermSizeSync, mediaFactory MediaSessionFactory, dial TCPDialFunc) (func() error, <-chan struct{}, error) {
+	if dial == nil {
+		return nil, nil, fmt.Errorf("tcp dialer is nil")
+	}
 	log.Printf("[p2p] dialing %s", prettyAddr(peerAddr, port))
-	conn, err := ygg.DialTCP(peerAddr, port)
+	conn, err := dial(peerAddr, port)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -91,11 +96,10 @@ func clientHandleIncoming(conn net.Conn, host string, port int, termSync *TermSi
 	if mediaFactory == nil {
 		log.Printf("[media] transport is disabled")
 	} else {
-		ip := net.ParseIP(strings.Trim(host, "[]"))
-		if ip == nil {
-			log.Printf("[media] invalid remote address %q", host)
+		raddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(strings.Trim(host, "[]"), strconv.Itoa(port)))
+		if err != nil {
+			log.Printf("[media] invalid remote address %q: %v", host, err)
 		} else {
-			raddr := &net.UDPAddr{IP: ip, Port: port}
 			if sess, err := mediaFactory(raddr); err != nil {
 				log.Printf("[media] failed to start: %v", err)
 			} else if sess != nil {
